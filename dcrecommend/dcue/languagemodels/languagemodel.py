@@ -73,9 +73,11 @@ class LanguageModel(nn.Module):
 
         # concatenate final hidden state of rnn with conv features and
         # pass into FC layer to create final song embedding
-        pos_featvects = torch.cat([pos_hidden, pos_attnfeatvects], dim=1)
-        pos_featvects = self.fc(pos_featvects)
+        orig_pos_featvects = torch.cat([pos_hidden, pos_attnfeatvects], dim=1)
+        pos_featvects = self.fc(orig_pos_featvects)
         pos_featvects = self.relu(pos_featvects)
+        # residual connection
+        pos_featvects += orig_pos_featvects
         pos_featvects = self.proj(pos_featvects)
 
         # pos_log_probs: batch size x vocab_size x seqlen
@@ -100,9 +102,11 @@ class LanguageModel(nn.Module):
 
         # concatenate final hidden state of rnn with conv features and
         # pass into FC layer to create final song embedding
-        neg_featvects = torch.cat([neg_hidden, neg_attnfeatvects], dim=1)
-        neg_featvects = self.fc(neg_featvects)
+        orig_neg_featvects = torch.cat([neg_hidden, neg_attnfeatvects], dim=1)
+        neg_featvects = self.fc(orig_neg_featvects)
         neg_featvects = self.relu(neg_featvects)
+        # residual connection
+        neg_featvects += orig_neg_featvects
         neg_featvects = self.proj(neg_featvects)
 
         # neg scores

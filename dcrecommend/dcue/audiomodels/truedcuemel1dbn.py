@@ -64,6 +64,8 @@ class TrueDcueNetMel1DBn(nn.Module):
 
         self.fc = nn.Linear(self.output_size, self.output_size)
 
+        self.outsize = [self.hidden_size, 1]
+
         # initizlize weights
         nn.init.kaiming_uniform_(self.layer1.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.layer2.weight, nonlinearity='relu')

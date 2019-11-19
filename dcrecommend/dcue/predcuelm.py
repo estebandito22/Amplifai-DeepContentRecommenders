@@ -3,20 +3,28 @@
 import torch
 import torch.nn as nn
 
-from dcrecommend.dcue.audiomodels.truedcuemel1dbn import TrueDcueNetMel1DBn
-from dcrecommend.dcue.audiomodels.truedcuemeltrunc1d import TrueDcueNetMelTrunc1D
-from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dres import TrueDcueNetMelTrunc1DRes
-from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dmultibn import TrueDcueNetMelTrunc1DMultiBn
-from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dresbn import TrueDcueNetMelTrunc1DResBn
-from dcrecommend.dcue.audiomodels.truedcuemel1dmultibn import TrueDcueNetMel1DMultiBn
-from dcrecommend.dcue.audiomodels.truedcuemel1dattnbn import TrueDcueNetMel1DAttnBn
+# from dcrecommend.dcue.audiomodels.truedcuemel1dbn import TrueDcueNetMel1DBn
+# from dcrecommend.dcue.audiomodels.truedcuemeltrunc1d import TrueDcueNetMelTrunc1D
+# from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dres import TrueDcueNetMelTrunc1DRes
+# from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dmultibn import TrueDcueNetMelTrunc1DMultiBn
+# from dcrecommend.dcue.audiomodels.truedcuemeltrunc1dresbn import TrueDcueNetMelTrunc1DResBn
+# from dcrecommend.dcue.audiomodels.truedcuemel1dmultibn import TrueDcueNetMel1DMultiBn
+# from dcrecommend.dcue.audiomodels.truedcuemel1dattnbn import TrueDcueNetMel1DAttnBn
+#
+# from dcrecommend.dcue.languagemodels.languagemodel import LanguageModel
 
-from dcrecommend.dcue.languagemodels.languagemodel import LanguageModel
+from dc.dcue.audiomodels.truedcuemel1dbn import TrueDcueNetMel1DBn
+from dc.dcue.audiomodels.truedcuemeltrunc1d import TrueDcueNetMelTrunc1D
+from dc.dcue.audiomodels.truedcuemeltrunc1dres import TrueDcueNetMelTrunc1DRes
+from dc.dcue.audiomodels.truedcuemeltrunc1dmultibn import TrueDcueNetMelTrunc1DMultiBn
+from dc.dcue.audiomodels.truedcuemeltrunc1dresbn import TrueDcueNetMelTrunc1DResBn
+from dc.dcue.audiomodels.truedcuemel1dmultibn import TrueDcueNetMel1DMultiBn
+from dc.dcue.audiomodels.truedcuemel1dattnbn import TrueDcueNetMel1DAttnBn
 
-from dcrecommend.dcue.embeddings.userembedding import UserEmbeddings
+from dc.dcue.languagemodels.languagemodel import LanguageModel
 
 
-class DCUELMNet(nn.Module):
+class PreDCUELMNet(nn.Module):
 
     """PyTorch class implementing DCUE Model."""
 
@@ -32,13 +40,11 @@ class DCUELMNet(nn.Module):
         user_embdim: The dimension of the user lookup embedding.
         user_count: The count of users that will be embedded.
         """
-        super(DCUELMNet, self).__init__()
+        super(PreDCUELMNet, self).__init__()
 
         # attributes
         self.feature_dim = dict_args["feature_dim"]
         self.conv_hidden = dict_args["conv_hidden"]
-        self.user_embdim = dict_args["user_embdim"]
-        self.user_count = dict_args["user_count"]
         self.model_type = dict_args["model_type"]
         self.word_embdim = dict_args["word_embdim"]
         self.word_embeddings_src = dict_args["word_embeddings_src"]
@@ -57,7 +63,7 @@ class DCUELMNet(nn.Module):
         if self.model_type == 'truedcuemel1dbn':
             self.conv = TrueDcueNetMel1DBn(dict_args)
             self.conv_outsize = self.conv.outsize
-        elif self.model_type == 'truedcuemeltrunc1d':
+        if self.model_type == 'truedcuemeltrunc1d':
             self.conv = TrueDcueNetMelTrunc1D(dict_args)
             self.conv_outsize = self.conv.outsize
         elif self.model_type == 'truedcuemeltrunc1dres':
@@ -79,13 +85,6 @@ class DCUELMNet(nn.Module):
             raise ValueError(
                 "{} is not a recognized model type!".format(self.model_type))
 
-        # user embedding arguments
-        dict_args = {'user_embdim': self.user_embdim,
-                     'user_count': self.user_count,
-                     'feature_dim': self.feature_dim}
-
-        self.user_embd = UserEmbeddings(dict_args)
-
         # language model arguments
         dict_args = {'feature_dim': self.feature_dim,
                      'conv_outsize': self.conv_outsize,
@@ -101,9 +100,7 @@ class DCUELMNet(nn.Module):
 
         self.lm = LanguageModel(dict_args)
 
-        self.sim = nn.CosineSimilarity(dim=1)
-
-    def forward(self, u, pos, posseq, pos_si, pos_bl,
+    def forward(self, pos, posseq, pos_si, pos_bl,
                 neg=None, negseq=None, neg_si=None, neg_bl=None):
         """
         Forward pass.
@@ -112,9 +109,6 @@ class DCUELMNet(nn.Module):
         on positive sample and negative scores using u feature vector and
         ConvNet on randomly sampled negative examples.
         """
-        # user features
-        u_featvects = self.user_embd(u)
-
         # negative conv features
         if neg is not None and negseq is not None:
             if self.model_type.find('1d') > -1:
@@ -143,22 +137,14 @@ class DCUELMNet(nn.Module):
 
             if isinstance(pos_convfeatvects, list):
                 pos_convfeatvects = [x[:pos.size()[0]]
-                                     for x in posneg_convfeatvects]
+                                     for x in pos_convfeatvects]
             else:
-                pos_convfeatvects = posneg_convfeatvects[:pos.size()[0]]
+                pos_convfeatvects = pos_convfeatvects[:pos.size()[0]]
 
         # language model
         pos_featvects, pos_outputs, neg_featvects, neg_outputs, _, _ = self.lm(
             posseq, pos_convfeatvects, pos_si, pos_bl,
             negseq, neg_convfeatvects, neg_si, neg_bl)
-
-        # pos and neg scores
-        pos_scores = self.sim(u_featvects, pos_featvects)
-        if neg_featvects is not None:
-            neg_scores = self.sim(
-                u_featvects.unsqueeze(2), neg_featvects.permute(0, 2, 1))
-        else:
-            neg_scores = 0
 
         # language model outputs to be passed to NLLLoss
         if neg_outputs is not None:
@@ -168,10 +154,7 @@ class DCUELMNet(nn.Module):
             # batch size x vocab size x seqlen
             outputs = pos_outputs
 
-        # difference of scores to be passed to Hinge Loss
-        scores = pos_scores.view(pos_scores.size()[0], 1) - neg_scores
-
-        return scores, outputs
+        return outputs
 
 
 if __name__ == '__main__':

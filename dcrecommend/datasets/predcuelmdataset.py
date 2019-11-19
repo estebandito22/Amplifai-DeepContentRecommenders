@@ -8,8 +8,11 @@ from sklearn.model_selection import GroupShuffleSplit
 
 import torch
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 
-from dcrecommend.dcue.embeddings.wordembedding import WordEmbeddings
+# from dcrecommend.dcue.embeddings.wordembedding import WordEmbeddings
+
+from dc.dcue.embeddings.wordembedding import WordEmbeddings
 
 
 class PRELMDataset(Dataset):
@@ -17,7 +20,7 @@ class PRELMDataset(Dataset):
     """Class for loading dataset required for Language model."""
 
     def __init__(self, split, track_song_map, track_artist_map, track_list,
-                 tag_embed, artist_bios, max_sentence_length):
+                 metadata, artist_bios, max_sentence_length, random_seed=None):
         """
         Initialize DCUELM dataset.
 
@@ -27,25 +30,34 @@ class PRELMDataset(Dataset):
         self.split = split
 
         self.track_song_map = track_song_map
-        self.song_artist_map = track_artist_map
+        self.track_artist_map = track_artist_map
+        self.song_track_map = {v: k for (k, v) in self.track_song_map.items()}
 
         self.songids = track_list
+        self.metadata = metadata
 
-        self.track_tags = tag_embed
         self.artist_bios = artist_bios
+        self.random_seed = random_seed
 
         self._train_test_split()
+        songids = [self.track_song_map[x] for x in self.songids]
+        self.metadata = self.metadata[
+            self.metadata['song_id'].isin(songids)]
+
+        self.songid2metaindex = {v: k for (k, v)
+                                 in self.metadata['song_id'].to_dict().items()}
+
         self.max_sentence_length = max_sentence_length
 
     def _train_test_split(self):
 
         # create train and val and test splits for artist splitting
-        if (self.song_artist_map is not None):
+        if (self.track_artist_map is not None):
             # build artists
             uniq_songs = np.array(self.songids)
             artists = []
             for song in uniq_songs:
-                artists.append(self.song_artist_map[song])
+                artists.append(self.track_artist_map[song])
             artists = np.array(artists)
 
             # train split
@@ -95,19 +107,45 @@ class PRELMDataset(Dataset):
             elif self.split == 'test':
                 self.songids = test_songs
 
+    def _sample(self, X, length, dim=1):
+        if self.random_seed is not None:
+            np.random.seed(self.random_seed)
+        if X.size()[dim] > length:
+            rand_start = np.random.randint(0, X.size()[dim] - length)
+        else:
+            if dim == 0:
+                X = F.pad(X, (0, 0, 0, length - X.size()[dim]))
+            elif dim == 1:
+                X = F.pad(X, (0, length - X.size()[dim], 0, 0))
+            else:
+                raise ValueError("dim must be 0 or 1.")
+            return X
+
+        if dim == 0:
+            X = X[rand_start:rand_start + length]
+        elif dim == 1:
+            X = X[:, rand_start:rand_start + length]
+        else:
+            raise ValueError("dim must be 0 or 1.")
+        return X
+
     def __len__(self):
         """Return length of the dataset."""
-        return len(self.songids)
+        return self.metadata.shape[0]
 
     def __getitem__(self, i):
         """Return a sample from the dataset."""
         # positive sample
-        song_id = self.songids[i]
-        tags = self.track_tags[song_id]
-        bio = self.artist_bios[self.song_artist_map[song_id]]
+        song_id = self.metadata.iat[i, 1]
+        song_idx = self.songid2metaindex[song_id]
+
+        # load torch positive tensor
+        X = torch.load(self.metadata.at[song_idx, 'data_mel'])
+        X = self._sample(X, 131, 1)
 
         # load text
-        bio = self.artist_bios[self.song_artist_map[song_id]]
+        bio = self.artist_bios[
+            self.track_artist_map[self.song_track_map[song_id]]]
         b_len = torch.LongTensor([len(bio)])
 
         # bio is broken up by sentences.  select a random sentence for each
@@ -121,5 +159,5 @@ class PRELMDataset(Dataset):
             constant_values=WordEmbeddings.PAD_IDX)
         t = torch.from_numpy(t).long()
 
-        return {'track': song_id, 'X': tags, 't': t,
-                'sent_pos': smpl, 'bio_len': b_len}
+        return {'track': song_id, 'X': X, 't': t,
+                's_pos': smpl, 'b_len': b_len}

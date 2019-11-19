@@ -2,8 +2,11 @@
 
 import torch.nn as nn
 
-from dc.dcbr.nn.audiomodel import ConvNetMel
-from dc.dcbr.nn.audiomodel import ConvNetScatter
+# from dc.dcbr.nn.audiomodel import ConvNetMel
+# from dc.dcbr.nn.audiomodel import ConvNetScatter
+
+from dcrecommend.dcbr.nn.audiomodel import ConvNetMel
+from dcrecommend.dcbr.nn.audiomodel import ConvNetScatter
 
 
 class DCBRNet(nn.Module):

@@ -4,9 +4,13 @@ from collections import defaultdict
 
 import pandas as pd
 
-from dc.dcbr.cf.evaluation import train_test_split
-from dc.dcbr.cf.evaluation import precision_at_k
-from dc.dcbr.cf.evaluation import mean_average_precision_at_k
+# from dc.dcbr.cf.evaluation import train_test_split
+# from dc.dcbr.cf.evaluation import precision_at_k
+# from dc.dcbr.cf.evaluation import mean_average_precision_at_k
+
+from dcrecommend.dcbr.cf.evaluation import train_test_split
+from dcrecommend.dcbr.cf.evaluation import precision_at_k
+from dcrecommend.dcbr.cf.evaluation import mean_average_precision_at_k
 
 
 def cross_validate(dh, estimator, n_splits=4, train_pct=0.75, n_recs=500,

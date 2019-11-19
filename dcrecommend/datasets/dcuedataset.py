@@ -46,6 +46,7 @@ class DCUEDataset(Dataset):
 
         self.songid2metaindex = None
         self.itemindex2songid = None
+        self.userindex2userid = None
 
         self.split = split
         self.random_seed = random_seed
@@ -59,11 +60,16 @@ class DCUEDataset(Dataset):
         self.n_items = self.item_user.shape[0]
         self.n_users = self.item_user.shape[1]
         self.all_items = np.arange(0, self.n_items)
+        self.all_users = np.arange(0, self.n_users)
 
         # dataset stats
         self.uniq_songs = self.triplets['song_id'].unique()
         self.uniq_song_idxs = [self.item_index[song_id] for
                                song_id in self.uniq_songs]
+
+        self.uniq_users = self.triplets['user_id'].unique()
+        self.uniq_user_idxs = [self.user_index[user_id] for
+                               user_id in self.uniq_users]
 
     def _item_user_matrix(self):
         """Build the csr matrix of item x user."""
@@ -96,6 +102,8 @@ class DCUEDataset(Dataset):
                                  in self.metadata['song_id'].to_dict().items()}
         self.itemindex2songid = {v: k for (k, v)
                                  in self.item_index.items()}
+        self.userindex2userid = {v: k for (k, v)
+                                 in self.user_index.items()}
 
     def _train_test_split(self):
         # create train and val and test splits for artist splitting
@@ -159,6 +167,7 @@ class DCUEDataset(Dataset):
         if self.random_seed is not None:
             np.random.seed(self.random_seed)
         if X.size()[dim] > length:
+            np.random.seed()
             rand_start = np.random.randint(0, X.size()[dim] - length)
         else:
             if dim == 0:

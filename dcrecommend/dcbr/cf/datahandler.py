@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from dc.dcbr.cf.evaluation import train_test_split as tts
+from dcrecommend.dcbr.cf.evaluation import train_test_split as tts
 
 
 class CFDataHandler():

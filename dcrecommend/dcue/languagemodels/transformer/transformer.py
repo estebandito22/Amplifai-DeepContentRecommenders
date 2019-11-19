@@ -103,6 +103,8 @@ class TransformerDecoder(nn.Module):
 
         # project convfeatvects
         # batch_size x context_size x hidden_size
+        if convfeatvects.dim() < 3:
+            convfeatvects = convfeatvects.unsqueeze(-1)
         convfeatvects = self.context2hidden(convfeatvects.permute(0, 2, 1))
 
         # add positional encoding

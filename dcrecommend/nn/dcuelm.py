@@ -25,6 +25,14 @@ from dcrecommend.datasets.dcuelmitemset import DCUELMItemset
 from dcrecommend.dcue.embeddings.wordembedding import WordEmbeddings
 from dcrecommend.dcbr.cf.datahandler import CFDataHandler
 
+# from dc.nn.dcue import DCUE
+# from dc.optim.swats import Swats
+# from dc.dcue.dcuelm import DCUELMNet
+# from dc.datasets.dcuelmdataset import DCUELMDataset
+# from dc.datasets.dcuelmitemset import DCUELMItemset
+# from dc.dcue.embeddings.wordembedding import WordEmbeddings
+# from dc.dcbr.cf.datahandler import CFDataHandler
+
 
 class DCUELM(DCUE):
 
@@ -34,7 +42,7 @@ class DCUELM(DCUE):
                  neg_batch_size=20, u_embdim=300, margin=0.2, optimize='adam',
                  lr=0.01, beta_one=0.9, beta_two=0.99, eps=1e-8,
                  weight_decay=0, num_epochs=100, model_type='mel',
-                 eval_pct=0.025, val_pct=1.0, freeze_conv=False,
+                 eval_pct=0.025, val_pct=1.0, freeze=True,
                  word_embdim=300, vocab_size=20000, max_sentence_length=None,
                  lm_hidden_size=512, n_heads=8, n_layers=6, dropout=0,
                  loss_alpha=0.5):
@@ -44,7 +52,7 @@ class DCUELM(DCUE):
                       beta_two, eps, weight_decay, num_epochs, model_type,
                       eval_pct, val_pct)
 
-        self.freeze_conv = freeze_conv
+        self.freeze = freeze
         self.word_embdim = word_embdim
         self.vocab_size = vocab_size
         self.max_sentence_length = max_sentence_length
@@ -54,8 +62,6 @@ class DCUELM(DCUE):
         self.dropout = dropout
         self.loss_alpha = loss_alpha
 
-        self.side_losses_train = []
-        self.side_losses_val = []
         self.side_loss_func = None
 
         self.song_artist_map = None
@@ -68,40 +74,43 @@ class DCUELM(DCUE):
         self.metadata_path = None
         self.artist_bios_path = None
 
-    def _load_pretrained_models(self, language_model_src, convnet_model_src):
-        # Load pre-trained conv and language models
-        lm_state_dict = conv_state_dict = None
+        self.best_val_sloss = float('inf')
+
+    def _load_pretrained_models(self, language_model_src=None,
+                                convnet_model_src=None):
+
+        state_dict = self.model.state_dict()
 
         # language model
         if self.language_model_src is not None:
-            if (not torch.cuda.is_available()):
-                lm_state_dict = torch.load(
-                    open(self.language_model_src, 'rb'), map_location='cpu')
+            if not torch.cuda.is_available():
+                with open(self.language_model_src, 'rb') as f:
+                    checkpoint = torch.load(f, map_location='cpu')
             else:
-                lm_state_dict = torch.load(open(self.language_model_src, 'rb'))
+                with open(self.language_model_src, 'rb') as f:
+                    checkpoint = torch.load(f)
 
-            keys = [k for k in lm_state_dict.keys()]
-            for key in keys:
-                lm_state_dict['lm.' + key] = lm_state_dict.pop(key)
+            state_dict.update(checkpoint['state_dict'])
+            print("Updated LM State Dict")
+
+            # keys = [k for k in lm_state_dict.keys()]
+            # for key in keys:
+            #     lm_state_dict['lm.' + key] = lm_state_dict.pop(key)
 
         # convnet model
         if self.convnet_model_src is not None:
-            if (not torch.cuda.is_available()):
-                conv_state_dict = torch.load(
-                    open(self.convnet_model_src, 'rb'), map_location='cpu')
+            if not torch.cuda.is_available():
+                with open(self.convnet_model_src, 'rb') as f:
+                    checkpoint = torch.load(f, map_location='cpu')
             else:
-                conv_state_dict = torch.load(
-                    open(self.convnet_model_src, 'rb'))
+                with open(self.convnet_model_src, 'rb') as f:
+                    checkpoint = torch.load(f)
 
-            if 'state_dict' in conv_state_dict.keys():
-                conv_state_dict = conv_state_dict['state_dict']
+            state_dict.update(checkpoint['state_dict'])
+            print("Updated Conv State Dict")
 
-        if lm_state_dict is not None and conv_state_dict is not None:
-            conv_state_dict.update(lm_state_dict)
-
-        if conv_state_dict is not None:
-            self.model.state_dict().update(conv_state_dict)
-            self.model.load_state_dict(self.model.state_dict())
+        if (language_model_src is not None) or (convnet_model_src is not None):
+            self.model.load_state_dict(state_dict)
 
     def _init_nn(self):
         """Initialize the nn model for training."""
@@ -125,9 +134,11 @@ class DCUELM(DCUE):
         self._load_pretrained_models(
             self.language_model_src, self.convnet_model_src)
 
-        if self.freeze_conv:
+        if self.freeze:
             for param in self.model.conv.parameters():
-                param.requires_grad = False
+                param.requires_grad_(False)
+            # for param in self.model.lm.decoder.parameters():
+            #     param.requires_grad_(False)
 
         self.side_loss_func = nn.NLLLoss(ignore_index=0)
 
@@ -331,7 +342,7 @@ class DCUELM(DCUE):
                Max Sentence Length: {}\n\
                Batch Size: {}\n\
                Negative Batch Size: {}\n\
-               Freeze Conv: {}\n\
+               Freeze: {}\n\
                Loss Alpha: {}\n\
                Margin: {}\n\
                Optimizer: {}\n\
@@ -350,7 +361,7 @@ class DCUELM(DCUE):
                    self.feature_dim, self.conv_hidden, self.u_embdim,
                    self.lm_hidden_size, self.vocab_size,
                    self.max_sentence_length, self.batch_size,
-                   self.neg_batch_size, self.freeze_conv, self.loss_alpha,
+                   self.neg_batch_size, self.freeze, self.loss_alpha,
                    self.margin, self.optimize, self.lr, self.weight_decay,
                    self.num_epochs, self.model_type, n_users, n_items,
                    language_model_src, convnet_model_src, artist_bios_path,
@@ -396,11 +407,13 @@ class DCUELM(DCUE):
         train_loss = 0
         train_sloss = 0
         samples_processed = 0
+        patience = 0
+        patience_flag = False
 
         # train loop
         while self.nn_epoch < self.num_epochs + 1:
 
-            train_loaders = self._batch_loaders(self.train_data, k=100)
+            train_loaders = self._batch_loaders(self.train_data, k=200)
 
             for train_loader in train_loaders:
                 if self.nn_epoch > 0:
@@ -437,6 +450,30 @@ class DCUELM(DCUE):
                     len(self.train_data)*self.num_epochs, train_loss,
                     val_loss, train_auc, val_auc, train_map, val_map,
                     train_sloss, val_sloss), flush=True)
+
+                if val_sloss < self.best_val_sloss:
+                    self.best_val_sloss = val_sloss
+                    self.best_decoder = {k: v for (k, v)
+                                         in self.model.state_dict().items()
+                                         if k.find('decoder') > -1}
+                    patience += 1
+                else:
+                    patience = 0
+
+                if (val_sloss > self.best_val_sloss) and (patience > 5):
+                    patience_flag = True
+                    state_dict = self.model.state_dict()
+                    state_dict.update(self.best_decoder)
+                    self.model.load_state_dict(state_dict)
+                    for param in self.model.lm.decoder.parameters():
+                        param.requires_grad_(False)
+
+                if patience_flag:
+                    state_dict = self.model.state_dict()
+                    state_dict.update(self.best_decoder)
+                    self.model.load_state_dict(state_dict)
+                    for param in self.model.lm.decoder.parameters():
+                        param.requires_grad_(False)
 
                 # save based on map
                 self._update_best(val_map, val_auc, val_loss)
@@ -608,10 +645,10 @@ class DCUELM(DCUE):
     #     return neg, neg_t, neg_yt, neg_si, neg_bl
 
     def _format_model_subdir(self):
-        subdir = "DCUELM_la_{}_op_{}_lr_{}_wd_{}_nu_{}_ni_{}_mt_{}_hs_{}_nh_{}_nl_{}_ue_{}_ch_{}_fc_{}".\
+        subdir = "DCUELM_la_{}_op_{}_lr_{}_wd_{}_nu_{}_ni_{}_mt_{}_hs_{}_nh_{}_nl_{}_ue_{}_ch_{}_fe_{}".\
             format(self.loss_alpha, self.optimize, self.lr, self.weight_decay,
                    self.n_users, self.n_items, self.model_type,
                    self.lm_hidden_size, self.n_heads, self.n_layers,
-                   self.u_embdim, self.conv_hidden, self.freeze_conv)
+                   self.u_embdim, self.conv_hidden, self.freeze)
 
         return subdir

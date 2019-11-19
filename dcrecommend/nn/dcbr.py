@@ -17,7 +17,7 @@ from dcrecommend.dcbr.cf.evaluators import cross_validate
 
 from dcrecommend.datasets.dcbrdataset import DCBRDataset
 from dcrecommend.datasets.dcbrpredset import DCBRPredset
-from dcrecommend.datasets.transforms import SubtractMean
+# from dcrecommend.datasets.transforms import SubtractMean
 
 from dcrecommend.dcbr.dcbr import DCBRNet
 

@@ -36,6 +36,7 @@ class DCUEPredset(DCUEDataset):
         # user data sets
         self.triplets_user = self.triplets
         self.user_has_songs = False
+        self.song_has_users = False
 
     def _user_nonitem_songids(self, user_id):
         """
@@ -50,6 +51,20 @@ class DCUEPredset(DCUEDataset):
             (~np.in1d(self.all_items, items)) &
             (np.in1d(self.all_items, self.uniq_song_idxs))]
         return [self.itemindex2songid[idx] for idx in nonitems]
+
+    def _song_nonuser_userids(self, song_id):
+        """
+        Sample negative users for item.
+
+        Args
+            song_id: a song id from the triplets_txt file.
+        """
+        i = self.item_index[song_id]
+        users = self.item_user.getrow(i).nonzero()[0]
+        nonusers = self.all_users[
+            (~np.in1d(self.all_users, users)) &
+            (np.in1d(self.all_users, self.uniq_user_idxs))]
+        return [self.userindex2userid[idx] for idx in nonusers]
 
     def create_user_data(self, user_id):
         """
@@ -78,7 +93,39 @@ class DCUEPredset(DCUEDataset):
                 [self.triplets_user, triplets_user_comp])
         else:
             self.triplets_user = triplets_user_comp
-            self.user_has_songs = True
+            # self.user_has_songs = True
+
+        self.triplets_user = \
+            self.triplets_user[['user_id', 'song_id', 'score']]
+
+    def create_song_data(self, song_id):
+        """
+        Build a user specific dataset to predict from.
+
+        Args
+            user_id: A user id from the triplets_txt data.
+        """
+        self.triplets_user = self.triplets[
+            self.triplets['song_id'] == song_id].copy()
+
+        if not self.triplets_user.empty:
+            self.song_has_users = True
+            self.triplets_user['score'] = 1
+        else:
+            self.song_has_users = False
+
+        song_non_users = self._song_nonuser_userids(song_id)
+
+        triplets_user_comp = pd.DataFrame(
+            {'user_id': song_non_users,
+             'song_id': [song_id]*len(song_non_users),
+             'score': [0]*len(song_non_users)})
+        if self.song_has_users:
+            self.triplets_user = pd.concat(
+                [self.triplets_user, triplets_user_comp])
+        else:
+            self.triplets_user = triplets_user_comp
+            # self.song_has_users = False
 
         self.triplets_user = \
             self.triplets_user[['user_id', 'song_id', 'score']]

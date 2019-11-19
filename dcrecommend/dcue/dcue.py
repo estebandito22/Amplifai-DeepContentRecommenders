@@ -105,7 +105,7 @@ class DCUENet(nn.Module):
 
         scores = pos_scores.view(pos_scores.size()[0], 1) - neg_scores
 
-        return scores
+        return scores, u_featvects, pos_featvects, neg_featvects
 
 
 if __name__ == '__main__':

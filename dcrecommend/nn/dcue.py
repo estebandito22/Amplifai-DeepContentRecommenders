@@ -33,7 +33,7 @@ from dcrecommend.dcue.dcue import DCUENet
 from dcrecommend.nn.trainer import Trainer
 from dcrecommend.optim.ranger import Ranger
 from dcrecommend.optim.cyclic_scheduler import CyclicLRWithRestarts
-from dcrecommend.dcbr.cf.datahandler import CFDataHandler
+# from dcrecommend.dcbr.cf.datahandler import CFDataHandler
 import json
 import csv
 

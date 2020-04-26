@@ -12,6 +12,7 @@ build
 dcrecommend.egg-info
 dist
 dcrecommend/datasets/deprecated
+dcrecommend/dcbr
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

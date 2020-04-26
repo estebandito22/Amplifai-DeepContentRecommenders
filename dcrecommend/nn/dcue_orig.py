@@ -31,8 +31,7 @@ from dcrecommend.datasets.dcuepredset import DCUEPredset
 from dcrecommend.datasets.dcueitemset import DCUEItemset
 from dcrecommend.dcue.dcue import DCUENet
 from dcrecommend.nn.trainer import Trainer
-from dcrecommend.optim.ranger import Ranger
-from dcrecommend.optim.cyclic_scheduler import CyclicLRWithRestarts
+# from dcrecommend.optim.swats import Swats
 from dcrecommend.dcbr.cf.datahandler import CFDataHandler
 import json
 import csv
@@ -45,9 +44,9 @@ class DCUE(Trainer):
     def __init__(self, feature_dim=100, conv_hidden=128,
                  batch_size=64, neg_batch_size=20, u_embdim=300, margin=0.2,
                  optimize='adam', lr=0.00001, beta_one=0.9, beta_two=0.99,
-                 eps=1e-8, weight_decay=0, restart_period=30, t_mult=2,
-                 num_epochs=90, model_type='truedcuemel1dbn', eval_pct=0.025,
-                 val_pct=1.0):
+                 eps=1e-8, eps_adv=0.5, weight_decay=0, reg_adv=1,
+                 adv_epoch=75, num_epochs=100, loss_type='margin',
+                 model_type='truedcuemel1dbn', eval_pct=0.025, val_pct=1.0):
         """
         Initialize DCUE model.
 
@@ -83,17 +82,17 @@ class DCUE(Trainer):
         self.beta_two = beta_two
         self.eps = eps
         self.weight_decay = weight_decay
-        self.restart_period = restart_period
-        self.t_mult = t_mult
         self.num_epochs = num_epochs
+        self.loss_type = loss_type
+        self.eps_adv = eps_adv
+        self.reg_adv = reg_adv
+        self.adv_epoch = adv_epoch
         self.model_type = model_type
         self.eval_pct = eval_pct
         self.val_pct = val_pct
 
         self.n_users = None
         self.n_items = None
-
-        self.epoch_size = None
 
         # Dataset attributes
         self.model_dir = None
@@ -108,6 +107,7 @@ class DCUE(Trainer):
         self.model = None
         self.optimizer = None
         self.scheduler = None
+        self.plateau_scheduler = None
         self.loss_func = None
         self.dict_args = None
         self.nn_epoch = 0
@@ -121,24 +121,26 @@ class DCUE(Trainer):
         self.best_val_auc = 0
         self.best_val_loss = float('inf')
 
+        self.word_embeddings_src = None
+        self.language_model_src = None
+        self.convnet_model_src = None
         self.metadata_path = None
-        self.triplets_path = None
+        self.artist_bios_path = None
+
+        self.song_artist_map = None
+        self.artist_bios = None
 
         self.USE_CUDA = torch.cuda.is_available()
 
-    def _init_nn(self, audio_model=None):
+    def _init_nn(self):
         """Initialize the nn model for training."""
         self.dict_args = {'feature_dim': self.feature_dim,
                           'conv_hidden': self.conv_hidden,
                           'user_embdim': self.u_embdim,
-                          'user_count': self.n_users,
+                          'user_count': self.train_data.n_users,
                           'model_type': self.model_type}
 
         self.model = DCUENet(self.dict_args)
-        if audio_model is not None:
-            state_dict = self.model.state_dict()
-            state_dict.update(audio_model)
-            self.model.load_state_dict(state_dict)
 
         if self.optimize == 'adam':
             self.optimizer = optim.Adam(
@@ -150,23 +152,79 @@ class DCUE(Trainer):
                 self.model.parameters(), self.lr, self.beta_one,
                 weight_decay=self.weight_decay, nesterov=True)
             self.scheduler = StepLR(self.optimizer, 1, 1 - 1e-6)
-        elif self.optimize == 'ranger':
-            self.optimizer = Ranger(
-                self.model.parameters(), lr=self.lr, alpha=0.5, k=6,
-                N_sma_threshhold=5, betas=(self.beta_one, self.beta_two),
-                eps=1e-5, weight_decay=self.weight_decay)
+        # elif self.optimize == 'swats':
+        #     self.optimizer = Swats(
+        #         self.model.parameters(), self.lr,
+        #         (self.beta_one, self.beta_two),
+        #         self.eps, self.weight_decay)
 
-        self.scheduler = CyclicLRWithRestarts(
-            self.optimizer, self.batch_size,
-            epoch_size=self.epoch_size, restart_period=self.restart_period,
-            t_mult=self.t_mult, policy='cosine')
+        self.plateau_scheduler = ReduceLROnPlateau(self.optimizer, patience=10)
 
         if self.USE_CUDA:
             self.model = self.model.cuda()
 
-    def _loss_func(self, preds):
+    def _loss_func(self, preds, u_featvects, pos_featvects, neg_featvects):
         loss = torch.max(
             torch.zeros_like(preds), self.margin - preds).sum(dim=1).mean()
+        # if self.loss_type == 'margin' or self.loss_type == 'margin_adv':
+        #     loss = torch.max(
+        #         torch.zeros_like(preds), self.margin - preds).sum(dim=1).mean()
+        #     if self.loss_type == 'margin_adv' and self.nn_epoch >= self.adv_epoch:
+        #         # build leaf nodes
+        #         u_featvects_adv_g = u_featvects.detach().requires_grad_(True)
+        #         pos_featvects_adv_g = pos_featvects.detach().requires_grad_(True)
+        #         neg_featvects_adv_g = neg_featvects.detach().requires_grad_(True)
+        #         # get adversarial updates
+        #         pos_scores_adv_g = F.cosine_similarity(u_featvects_adv_g, pos_featvects_adv_g)
+        #         neg_scores_adv_g = F.cosine_similarity(u_featvects_adv_g.unsqueeze(2), neg_featvects_adv_g.permute(0, 2, 1))
+        #         scores_adv_g = pos_scores_adv_g.view(pos_scores_adv_g.size()[0], 1) - neg_scores_adv_g
+        #         loss_g = torch.max(
+        #             torch.zeros_like(scores_adv_g), self.margin - scores_adv_g).sum(dim=1).mean()
+        #         loss_g.backward()
+        #         delta_u_adv = F.normalize(u_featvects_adv_g.grad) * self.eps_adv
+        #         delta_pos_adv = F.normalize(pos_featvects_adv_g.grad) * self.eps_adv
+        #         delta_neg_adv = F.normalize(neg_featvects_adv_g.grad) * self.eps_adv
+        #         # adversarial scores
+        #         u_featvects_adv = u_featvects + delta_u_adv
+        #         pos_featvects_adv = pos_featvects + delta_pos_adv
+        #         neg_featvects_adv = neg_featvects + delta_neg_adv
+        #         pos_scores_adv = F.cosine_similarity(u_featvects_adv, pos_featvects_adv)
+        #         neg_scores_adv = F.cosine_similarity(u_featvects_adv.unsqueeze(2), neg_featvects_adv.permute(0, 2, 1))
+        #         scores_adv = pos_scores_adv.view(pos_scores_adv.size()[0], 1) - neg_scores_adv
+        #         # adversarial regularization
+        #         loss += self.reg_adv * torch.max(
+        #             torch.zeros_like(scores_adv), self.margin - scores_adv).sum(dim=1).mean()
+        # elif self.loss_type == 'bpr' or self.loss_type == 'bpr_adv':
+        #     pos_scores = torch.matmul(pos_featvects.unsqueeze(1), u_featvects.unsqueeze(2))
+        #     neg_scores = torch.matmul(neg_featvects, u_featvects.unsqueeze(2))
+        #     scores = pos_scores - neg_scores
+        #     result = torch.clamp(scores, -80.0, 1e8)
+        #     loss = torch.mean(F.softplus(-result).sum(dim=1))
+        #     if self.loss_type == 'bpr_adv' and self.nn_epoch >= self.adv_epoch:
+        #         # build leaf nodes
+        #         u_featvects_adv_g = u_featvects.detach().requires_grad_(True)
+        #         pos_featvects_adv_g = pos_featvects.detach().requires_grad_(True)
+        #         neg_featvects_adv_g = neg_featvects.detach().requires_grad_(True)
+        #         # get adversarial updates
+        #         pos_scores_adv_g = torch.matmul(pos_featvects_adv_g.unsqueeze(1), u_featvects_adv_g.unsqueeze(2))
+        #         neg_scores_adv_g = torch.matmul(neg_featvects_adv_g, u_featvects_adv_g.unsqueeze(2))
+        #         scores_adv_g = (pos_scores_adv_g - neg_scores_adv_g)
+        #         result_adv_g = torch.clamp(scores_adv_g, -80.0, 1e8)
+        #         loss_g = torch.mean(F.softplus(-result_adv_g))
+        #         loss_g.backward()
+        #         delta_u_adv = F.normalize(u_featvects_adv_g.grad) * self.eps_adv
+        #         delta_pos_adv = F.normalize(pos_featvects_adv_g.grad) * self.eps_adv
+        #         delta_neg_adv = F.normalize(neg_featvects_adv_g.grad) * self.eps_adv
+        #         # adversarial scores
+        #         u_featvects_adv = u_featvects + delta_u_adv
+        #         pos_featvects_adv = pos_featvects + delta_pos_adv
+        #         neg_featvects_adv = neg_featvects + delta_neg_adv
+        #         pos_scores_adv = torch.matmul(pos_featvects_adv.unsqueeze(1), u_featvects_adv.unsqueeze(2))
+        #         neg_scores_adv = torch.matmul(neg_featvects_adv, u_featvects_adv.unsqueeze(2))
+        #         scores_adv = pos_scores_adv - neg_scores_adv
+        #         result_adv = torch.clamp(scores_adv, -80.0, 1e8)
+        #         # adversarial regularization
+        #         loss += self.reg_adv * torch.mean(F.softplus(-result_adv).sum(dim=1))
         return loss
 
     def _train_epoch(self, loader):
@@ -204,10 +262,12 @@ class DCUE(Trainer):
                 u, pos, neg)
 
             # backward pass
-            loss = self._loss_func(preds)
+            loss = self._loss_func(
+                preds, u_featvects, pos_featvects, neg_featvects)
             loss.backward()
             self.optimizer.step()
-            self.scheduler.batch_step()
+            if self.optimize == 'sgd':
+                self.scheduler.step()
 
             # compute train loss
             samples_processed += pos.size()[0]
@@ -252,7 +312,8 @@ class DCUE(Trainer):
                 u, pos, neg)
 
             # compute loss
-            loss = self._loss_func(preds)
+            loss = self._loss_func(
+                preds, u_featvects, pos_featvects, neg_featvects)
 
             samples_processed += pos.size()[0]
             val_loss += loss.item() * pos.size()[0]
@@ -263,7 +324,7 @@ class DCUE(Trainer):
 
     def fit(self, train_dataset, val_dataset, test_dataset, pred_dataset,
             truth_dataset, item_dataset, n_users, n_items, triplets_path,
-            metadata_path, save_dir, warm_start=False, audio_model=None):
+            metadata_path, artist_bios_path, save_dir, warm_start=False):
         """
         Train the NN model.
 
@@ -279,50 +340,57 @@ class DCUE(Trainer):
                User Embedding Dim: {}\n\
                Batch Size: {}\n\
                Negative Batch Size: {}\n\
+               Loss Type: {}\n\
                Margin: {}\n\
                Optimizer: {}\n\
                Learning Rate: {}\n\
                Weight Decay: {}\n\
-               Restart Period: {}\n\
-               T Multiplier: {}\n\
+               Adversarial Regulariztion: {}\n\
+               Adversarial Eps: {}\n\
+               Adversarial Epoch: {}\n\
                Num Epochs: {}\n\
                Model Type: {}\n\
                Num Users: {}\n\
                Num Items: {}\n\
                Triplets TXT: {}\n\
                Metadata CSV: {}\n\
+               Aritst Bio CSV: {}\n\
                Save Dir: {}".format(
                    self.feature_dim, self.conv_hidden, self.u_embdim,
-                   self.batch_size, self.neg_batch_size,
+                   self.batch_size, self.neg_batch_size, self.loss_type,
                    self.margin, self.optimize, self.lr, self.weight_decay,
-                   self.restart_period, self.t_mult, self.num_epochs,
-                   self.model_type, n_users, n_items,
-                   triplets_path, metadata_path, save_dir), flush=True)
+                   self.reg_adv, self.eps_adv, self.adv_epoch, self.num_epochs,
+                   self.model_type, n_users, n_items, triplets_path,
+                   metadata_path, artist_bios_path, save_dir), flush=True)
 
-        self.epoch_size = int(
-            int(np.ceil(len(train_dataset) / 10)) // self.batch_size) * self.batch_size
+        self.train_data = train_dataset
+        self.val_data = val_dataset
+        self.test_data = test_dataset
+        self.pred_data = pred_dataset
+        self.truth_data = truth_dataset
+        self.item_data = item_dataset
 
         self.n_users = n_users
         self.n_items = n_items
 
-        self.triplets_path = triplets_path
         self.metadata_path = metadata_path
+        self.artist_bios_path = artist_bios_path
 
         self.model_dir = save_dir
 
         # build general loaders
         truth_loader = DataLoader(
-            truth_dataset, batch_size=1024, shuffle=True,
+            self.truth_data, batch_size=1024, shuffle=True,
             num_workers=8)
 
-        val_dataset.subset(p=self.val_pct)
+        self.val_data.subset(p=self.val_pct)
         val_loader = DataLoader(
-            val_dataset, batch_size=self.batch_size, shuffle=False,
+            self.val_data, batch_size=self.batch_size, shuffle=False,
             num_workers=8)
 
         # initialize neural network
         if not warm_start:
-            self._init_nn(audio_model)
+            self._init_nn()
 
         # init training variables
         train_loss = 0
@@ -331,46 +399,45 @@ class DCUE(Trainer):
         # train loop
         while self.nn_epoch < self.num_epochs + 1:
 
-            train_loaders = self._batch_loaders(train_dataset, k=10)
+            train_loaders = self._batch_loaders(self.train_data, k=10)
 
             for train_loader in train_loaders:
-
                 if self.nn_epoch > 0:
-                    self.scheduler.step()
+                    if self.loss_type in ['bpr_adv', 'margin_adv'] and self.nn_epoch == self.adv_epoch:
+                        print("Now Using Adversarial Objective...")
                     print("\nInitializing train epoch...", flush=True)
                     sp, train_loss = self._train_epoch(train_loader)
                     samples_processed += sp
 
                 print("\nInitializing val epoch...", flush=True)
                 _, val_loss = self._eval_epoch(val_loader)
+                self.plateau_scheduler.step(val_loss)
 
                 # compute auc estimate.  Gives +/- approx 0.017 @ 95%
                 # confidence w/ 20K users.
                 print("\nInitializing AUC computation...", flush=True)
-                self._user_factors(item_dataset)
-                self._item_factors(item_dataset)
+                self._user_factors()
+                self._item_factors()
 
                 pred_loader = DataLoader(
-                    pred_dataset, batch_size=1024, shuffle=True,
+                    self.pred_data, batch_size=1024, shuffle=True,
                     num_workers=8)
                 val_auc, val_map = self._compute_scores(
-                    'val', pred_loader, truth_loader, train_dataset,
-                    val_dataset, test_dataset, pct=self.eval_pct)
+                    'val', pred_loader, truth_loader, pct=self.eval_pct)
 
                 val_user_auc, val_user_map = \
                     self._compute_scores_song(pred_loader, pct=self.eval_pct)
 
                 pred_loader = DataLoader(
-                    truth_dataset, batch_size=1024, shuffle=True,
+                    self.truth_data, batch_size=1024, shuffle=True,
                     num_workers=8)
                 train_auc, train_map = self._compute_scores(
-                    'train', pred_loader, truth_loader, train_dataset,
-                    val_dataset, test_dataset, pct=self.eval_pct)
+                    'train', pred_loader, truth_loader, pct=self.eval_pct)
 
                 # report
                 print("\nEpoch: [{}/{}]\tSamples: [{}/{}]\tTrain Loss: {}\tVal Loss: {}\tTrain AUC: {}\tVal AUC: {}\tTrain mAP: {}\tVal mAP: {}\tVal UAUC: {}\tVal UmAP: {}".format(
                     self.nn_epoch, self.num_epochs, samples_processed,
-                    len(train_dataset)*self.num_epochs, train_loss,
+                    len(self.train_data)*self.num_epochs, train_loss,
                     val_loss, train_auc, val_auc, train_map, val_map,
                     val_user_auc, val_user_map), flush=True)
 
@@ -428,6 +495,11 @@ class DCUE(Trainer):
                  [neg_auc_scores, neg_auc_targets]]:
 
                 if (scores is not None) and (targets is not None):
+                    # scores, targets = list(zip(
+                    #     *sorted(zip(scores, targets), key=lambda x: -x[0])))
+                    #
+                    # scores = scores[:k]
+                    # targets = targets[:k]
 
                     pn_scores += scores
                     pn_targets += targets
@@ -460,20 +532,58 @@ class DCUE(Trainer):
 
         auc = []
         mAP = []
+        # p1k = []
+        # p10k = []
+        # prec_dict = defaultdict(list)
+        # rec_dict = defaultdict(list)
+        # fpr_dict = defaultdict(list)
+        # tpr_dict = defaultdict(list)
         for song_id in tqdm(songs):
             scores, targets = self.predict_song(song_id, pred_loader)
+
             if (scores is not None) and (targets is not None):
+                # scores, targets = list(zip(
+                #     *sorted(zip(scores, targets), key=lambda x: -x[0])))
+
+                # scores = scores[:k]
+                # targets = targets[:k]
+
                 if sum(targets) == len(targets):
                     auc += [1]
                     mAP += [1]
+                    # p1k += [1]
+                    # p10k += [1]
                 elif sum(targets) == 0:
                     auc += [0]
                     mAP += [0]
+                    # p1k += [0]
+                    # p10k += [0]
                 else:
                     auc += [roc_auc_score(targets, scores)]
                     mAP += [average_precision_score(targets, scores)]
+        #             p1k += [precision_score(targets[:50], np.ones(50))]
+        #             p10k += [precision_score(targets[:100], np.ones(100))]
+        #             prec, rec, pr_thresh = precision_recall_curve(targets, np.round(scores, 2))
+        #             for p, r, t in zip(prec, rec, pr_thresh):
+        #                 prec_dict[t] += [p]
+        #                 rec_dict[t] += [r]
+        #             fpr, tpr, roc_thresh = roc_curve(targets, np.round(scores, 2))
+        #             for fp, tp, t in zip(fpr, tpr, roc_thresh):
+        #                 fpr_dict[t] += [fp]
+        #                 tpr_dict[t] += [tp]
+        # for k in prec_dict.keys():
+        #     prec_dict[k] = np.mean(prec_dict[k])
+        #     rec_dict[k] = np.mean(rec_dict[k])
+        # for k in fpr_dict.keys():
+        #     fpr_dict[k] = np.mean(fpr_dict[k])
+        #     tpr_dict[k] = np.mean(tpr_dict[k])
+        #
+        # print("precision", prec_dict)
+        # print("recall", rec_dict)
+        # print("fpr", fpr_dict)
+        # print("tpr", tpr_dict)
 
-        return np.mean(auc), np.mean(mAP)
+        return np.mean(auc), np.mean(mAP)#, np.mean(p1k), np.mean(p10k)
 
     def predict(self, user, loader):
         """
@@ -567,6 +677,10 @@ class DCUE(Trainer):
         self.user_factors = self.best_user_factors
 
     def _update_best(self, val_map, val_auc, val_loss):
+        if self.loss_type in ['bpr_adv', 'margin_adv'] and self.nn_epoch == self.adv_epoch:
+            self.best_val_map = 0
+        if self.loss_type in ['bpr_adv', 'margin_adv'] and self.nn_epoch == self.adv_epoch - 1:
+            self.save(models_dir=self.model_dir)
 
         if val_map > self.best_val_map:
             self.best_val_map = val_map
@@ -588,8 +702,7 @@ class DCUE(Trainer):
         elif self.nn_epoch % 5 == 0:
             self.save(models_dir=self.model_dir)
 
-    def _compute_scores(self, split, pred_loader, truth_loader,
-            train_data, val_data, test_data, pct=0.025):
+    def _compute_scores(self, split, pred_loader, truth_loader, pct=0.025):
         # if split == 'train':
         #     users = list(self.train_data.user_index.keys())
         # elif split == 'val':
@@ -600,13 +713,13 @@ class DCUE(Trainer):
         #                  intersection(set(self.test_data.user_index.keys())))
 
         if split == 'train':
-            users = list(train_data.uniq_users)
+            users = list(self.train_data.uniq_users)
         elif split == 'val':
-            users = list(set(train_data.uniq_users).
-                         intersection(set(val_data.uniq_users)))
+            users = list(set(self.train_data.uniq_users).
+                         intersection(set(self.val_data.uniq_users)))
         elif split == 'test':
-            users = list(set(train_data.uniq_users).
-                         intersection(set(test_data.uniq_users)))
+            users = list(set(self.train_data.uniq_users).
+                         intersection(set(self.test_data.uniq_users)))
 
         n_users = len(users)
         if pct < 1:
@@ -626,29 +739,29 @@ class DCUE(Trainer):
 
         return self.score_song(songs_sample, pred_loader)
 
-    def _user_factors(self, item_data):
+    def _user_factors(self):
         """Create user factors matrix."""
         self.user_factors = torch.zeros([self.n_users, self.feature_dim])
         self.model.eval()
         with torch.no_grad():
-            for i in tqdm(list(item_data.user_index.values())):
+            for i in tqdm(list(self.item_data.user_index.values())):
                 emb_idx = torch.tensor([i])
                 if self.USE_CUDA:
                     emb_idx = emb_idx.cuda()
                 self.user_factors[i] = self.model.user_embd(emb_idx)
 
-    def _item_factors(self, item_data, n_iter=10):
+    def _item_factors(self, n_iter=1):
         """Create item factors matrix."""
         item_loader = DataLoader(
-            item_data, batch_size=self.batch_size, shuffle=False,
+            self.item_data, batch_size=self.batch_size, shuffle=False,
             num_workers=4)
 
         self.item_factors = torch.zeros(
-            [len(item_data.songid2metaindex), self.feature_dim])
+            [len(self.item_data.songid2metaindex), self.feature_dim])
 
         self.model.eval()
         with torch.no_grad():
-            for j in range(n_iter):
+            for j in n_iter:
                 for batch_samples in tqdm(item_loader):
                     # batch size x seqdim x seqlen
                     X = batch_samples['X']
@@ -716,20 +829,20 @@ class DCUE(Trainer):
             subset = Subset(dataset, subset_batch_indexes)
             loader = DataLoader(
                 subset, batch_size=self.batch_size, shuffle=True,
-                num_workers=8, drop_last=True)
+                num_workers=8)
             loaders += [loader]
         return loaders
 
     def _format_model_subdir(self):
-        subdir = "DCUE_fd_{}_ch_{}_uh_{}_op_{}_lr_{}_wd_{}_rp_{}_tm_{}_nu_{}_ni_{}_mt_{}".\
+        subdir = "DCUE_fd_{}_ch_{}_uh_{}_op_{}_lr_{}_wd_{}_nu_{}_ni_{}_mt_{}_ea_{}_ra_{}_ae_{}".\
                 format(self.feature_dim, self.conv_hidden, self.u_embdim,
                        self.optimize, self.lr, self.weight_decay,
-                       self.restart_period, self.t_mult,
-                       self.n_users, self.n_items, self.model_type)
+                       self.n_users, self.n_items, self.model_type,
+                       self.eps_adv, self.reg_adv, self.adv_epoch)
 
         return subdir
 
-    def save(self, models_dir=None):
+    def save(self, models_dir=None, temp=False):
         """
         Save model.
 
@@ -746,10 +859,13 @@ class DCUE(Trainer):
             filename = "epoch_{}".format(self.nn_epoch) + '.pth'
             fileloc = os.path.join(models_dir, model_dir, filename)
             with open(fileloc, 'wb') as file:
-                torch.save(self.__dict__, file)
+                if not temp:
+                    torch.save({'dcue_dict': self.__dict__}, file)
+                else:
+                    torch.save({'state_dict': self.model.state_dict(),
+                                'train_loss': self.latest_train_loss}, file)
 
-
-    def load(self, model_dir, epoch):
+    def load(self, model_dir, epoch, temp=False):
         """
         Load a previously trained DCUE model.
 
@@ -765,9 +881,9 @@ class DCUE(Trainer):
             else:
                 checkpoint = torch.load(model_dict, map_location='cpu')
 
-        ignore_attr = []
+        ignore_attr = ['reg_adv', 'eps_adv']
 
-        for (k, v) in checkpoint.items():
+        for (k, v) in checkpoint['dcue_dict'].items():
             if k not in ignore_attr:
                 setattr(self, k, v)
         if torch.cuda.is_available():
@@ -777,9 +893,10 @@ class DCUE(Trainer):
 
         self._init_nn()
         self.model.load_state_dict(
-            checkpoint['model'].state_dict())
+            checkpoint['dcue_dict']['model'].state_dict())
         self.optimizer.load_state_dict(
-            checkpoint['optimizer'].state_dict())
-        self.scheduler.load_state_dict(
-            checkpoint['scheduler'].state_dict())
+            checkpoint['dcue_dict']['optimizer'].state_dict())
+        if self.plateau_scheduler is not None:
+            self.plateau_scheduler.load_state_dict(
+                checkpoint['dcue_dict']['plateau_scheduler'].state_dict())
         self.nn_epoch += 1

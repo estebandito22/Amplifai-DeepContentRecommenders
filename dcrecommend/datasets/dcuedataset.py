@@ -196,6 +196,8 @@ class DCUEDataset(Dataset):
         while s < len(indexes):
             batches += [indexes[s:s + size]]
             s = s + size
+        if len(indexes) % k != 0:
+            batches = batches[:-1]
         return batches
 
     def subset(self, p):
